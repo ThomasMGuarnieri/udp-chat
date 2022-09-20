@@ -2,164 +2,107 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"flag"
 	"fmt"
 	"net"
 	"os"
-	"os/signal"
-	"syscall"
-	"time"
 )
 
-// maxBufferSize specifies the size of the buffers that
-// are used to temporarily hold data from the UDP packets
-// that we receive.
 const (
-	maxBufSize = 1024
-	timeout    = 15 * time.Second
-	host       = "127.0.0.1"
-	port       = 1337
+	bufSize = 1024
+	ip      = "127.0.0.1"
+	port    = 4444
 )
 
 var isServer = flag.Bool("s", false, "whether it should be run as a server")
 
-func server(ctx context.Context, addr string) error {
-	doneCh := make(chan error, 1)
-	buf := make([]byte, maxBufSize)
+func server() error {
+	p := make([]byte, bufSize)
+	addr := net.UDPAddr{
+		Port: port,
+		IP:   net.ParseIP(ip),
+	}
 
-	pc, err := net.ListenPacket("udp", addr)
+	conn, err := net.ListenUDP("udp", &addr)
 	if err != nil {
 		return err
 	}
-
-	defer pc.Close()
-
-	go func() {
-		for {
-			// Read from client.
-			n, a, err := pc.ReadFrom(buf)
-			if err != nil {
-				doneCh <- err
-				return
-			}
-
-			fmt.Printf("packet-received: bytes=%d from=%s\n", n, a.String())
-
-			err = pc.SetWriteDeadline(time.Now().Add(timeout))
-			if err != nil {
-				doneCh <- err
-				return
-			}
-
-			// Write the packet's content back to the client.
-			n, err = pc.WriteTo(buf[:n], a)
-			if err != nil {
-				doneCh <- err
-				return
-			}
-
-			fmt.Printf("packet-written: bytes=%d to=%s\n", n, a.String())
+	for {
+		_, remoteAddr, err := conn.ReadFromUDP(p)
+		fmt.Printf("Read a message from %v %s \n", remoteAddr, p)
+		if err != nil {
+			fmt.Printf("Some error  %v", err)
+			continue
 		}
-	}()
+		go sendResponse(conn, remoteAddr)
+	}
+}
 
-	select {
-	case <-ctx.Done():
-		fmt.Println("\tServer says: bye!")
-		err = ctx.Err()
-	case <-doneCh:
-		return err
+func client() error {
+	p := make([]byte, bufSize)
+
+	conn, err := net.Dial("udp", fmt.Sprintf("%s:%d", ip, port))
+	if err != nil {
+		fmt.Printf("Some error %v", err)
+		return nil
+	}
+
+	defer conn.Close()
+
+	// scan the stdin for client messages
+	scn := bufio.NewScanner(os.Stdin)
+	for scn.Scan() {
+		_, err = fmt.Fprintf(conn, "%s", scn.Bytes())
+		if err != nil {
+			return err
+		}
+
+		// Read the answer from server
+		n, err := bufio.NewReader(conn).Read(p)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("%s\n", p[:n])
 	}
 
 	return nil
 }
 
-func client(ctx context.Context, addr string) error {
-	doneCh := make(chan error, 1)
-	buf := make([]byte, maxBufSize)
+//func broadcast(b []byte, as []net.Addr, conn net.PacketConn) error {
+//	for _, a := range as {
+//		fmt.Println("Broadcast: ", a)
+//		_, err := conn.WriteTo(b, a)
+//		if err != nil {
+//			return err
+//		}
+//	}
+//
+//	return nil
+//}
 
-	raddr, err := net.ResolveUDPAddr("udp", addr)
+func sendResponse(conn *net.UDPConn, addr *net.UDPAddr) {
+	_, err := conn.WriteToUDP([]byte("From server: Hello I got your message "), addr)
 	if err != nil {
-		return err
+		fmt.Printf("Couldn't send response %v", err)
 	}
-
-	conn, err := net.DialUDP("udp", nil, raddr)
-	if err != nil {
-		return err
-	}
-
-	defer conn.Close()
-
-	go func() {
-		for {
-			r := bufio.NewReader(os.Stdin)
-			str, err := r.ReadString('\n')
-			n, err := conn.Write([]byte(str))
-			if err != nil {
-				doneCh <- err
-				return
-			}
-
-			fmt.Printf("packet-written: bytes=%d\n", n)
-
-			deadline := time.Now().Add(timeout)
-			err = conn.SetReadDeadline(deadline)
-			if err != nil {
-				doneCh <- err
-				return
-			}
-
-			nRead, addr, err := conn.ReadFrom(buf)
-			if err != nil {
-				doneCh <- err
-				return
-			}
-
-			fmt.Printf("packet-received: bytes=%d from=%s\n", nRead, addr.String())
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		fmt.Println("cancelled")
-		err = ctx.Err()
-	case err = <-doneCh:
-		return err
-	}
-
-	return err
 }
 
 func main() {
 	flag.Parse()
 
-	var (
-		err     error
-		address = fmt.Sprintf("%s:%d", host, port)
-	)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go func() {
-		sigChan := make(chan os.Signal)
-		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-		<-sigChan
-		cancel()
-	}()
-
 	if *isServer {
-		fmt.Println("running as a server on " + address)
-		err = server(ctx, address)
-		if err != nil && err != context.Canceled {
-			panic(err)
+		fmt.Println("running as a server on ")
+		err := server()
+		if err != nil {
+			fmt.Println(err)
 		}
-		return
 	}
 
-	fmt.Println("sending to " + address)
-	err = client(ctx, address)
-	if err != nil && err != context.Canceled {
-		panic(err)
+	fmt.Println("sending to ")
+	err := client()
+	if err != nil {
+		fmt.Println(err)
 	}
+
 }
